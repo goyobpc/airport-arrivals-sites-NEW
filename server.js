@@ -1,0 +1,97 @@
+import express from 'express';
+import fetch from 'node-fetch';
+import * as cheerio from 'cheerio';
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const SOURCES = {
+  JFK: 'https://www.airport-jfk.com/arrivals.php',
+  EWR: 'https://www.airport-ewr.com/newark-arrivals'
+};
+
+const TERMINALS = {
+  'jfk-terminal-1': { airport:'JFK', terminal:'1', title:'JFK Terminal 1' },
+  'jfk-terminal-4': { airport:'JFK', terminal:'4', title:'JFK Terminal 4' },
+  'jfk-terminal-7': { airport:'JFK', terminal:'7', title:'JFK Terminal 7' },
+  'jfk-terminal-8': { airport:'JFK', terminal:'8', title:'JFK Terminal 8' },
+  'ewr-terminal-b': { airport:'EWR', terminal:'B', title:'EWR Terminal B' },
+  'ewr-terminal-c': { airport:'EWR', terminal:'C', title:'EWR Terminal C' }
+};
+
+// US + territories to remove domestic flights. Canada/Mexico/Caribbean remain international.
+const US_AIRPORTS = new Set(`ABE ABI ABQ ACK ACT ACV ACY ADK ADQ AEX AGS ALB ANC APN ASE ATL ATW AUS AVL AVP AZA BDL BET BFF BFI BFL BGM BGR BHM BIL BIS BJI BLI BMI BNA BOI BOS BPT BQK BRD BRO BTM BTR BTV BUF BUR BWI BZN CAE CAK CDC CDV CGI CHA CHO CHS CID CIU CKB CLE CLL CLT CMH CMI CMX COD COS COU CPR CRP CRW CSG CVG CWA DAB DAL DAY DBQ DCA DEN DFW DHN DIK DLG DLH DRO DSM DTW EAU ECP EGE EKO ELM ELP ERI ESC EUG EVV EWN EWR EYW FAI FAR FAT FAY FCA FLG FLL FLO FNT FSD FSM FWA GCK GEG GFK GGG GJT GNV GPT GRB GRK GRR GSO GSP GST GTF GTR GUC HDN HGR HHH HIB HLN HNL HOB HOU HPN HRL HSV HTS HVN HYA IAD IAH ICT IDA ILM IMT IND INL IPL ITH JAC JAN JAX JFK JLN JNU KOA KTn LAN LAS LAW LAX LBB LBE LCH LEX LFT LGA LGB LIH LIT LNK LRD LSE LWS MAF MBS MCI MCO MDT MDW MEI MEM MFE MFR MGM MHK MHT MIA MKE MKG MLB MLI MLU MOB MOT MQT MRY MSN MSO MSP MSY MTJ MVY MYR OAJ OAK OGG OKC OMA ONT ORD ORF ORH OTH PAH PBG PBI PDX PGD PHF PHL PHX PIA PIB PIE PIT PLN PNS PPG PSC PSE PSG PSP PUB PVD PWM RAP RDD RDM RDU RFD RHI RIC RKS RNO ROA ROC ROW RST RSW SAF SAN SAT SAV SBA SBN SBP SCC SCE SDF SEA SFO SGF SGU SHD SHV SIT SJC SJT SJU SLC SLN SMF SMX SNA SPI SPS SRQ STC STL STS SUN SUX SWF SYR TLH TOL TPA TRI TTN TUL TUS TVC TWF TXK TYR TYS USA VEL VPS WRG XNA YAK YUM ITO GUM SPN STT STX BQN ILG ILN TEB PAE RIC`.split(/\s+/));
+
+function isFlightCode(s) { return /^[A-Z0-9]{1,3}\d{1,4}[A-Z]?$/.test(s.trim()); }
+function iataFromOrigin(origin) { const m = origin.match(/\(([A-Z0-9]{3})\)\s*$/); return m ? m[1] : ''; }
+function isInternational(origin) { const code = iataFromOrigin(origin); return code && !US_AIRPORTS.has(code); }
+function uniqByFlight(rows) {
+  const seen = new Set();
+  return rows.filter(r => { const k = `${r.flight}|${r.arrival}|${r.terminal}`; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
+function parseFlights(html) {
+  const $ = cheerio.load(html);
+  $('script,style,noscript,svg,form,nav,footer').remove();
+  const raw = $('body').text().split('\n').map(x => x.replace(/\s+/g,' ').trim()).filter(Boolean);
+  const start = raw.findIndex((v,i) => v === 'Origin' && raw[i+1] === 'Arrival');
+  const endHints = ['This list contains', 'Date:', 'Check other time periods:'];
+  const tokens = raw.slice(start > -1 ? start + 6 : 0);
+  const rows = [];
+  let i = 0;
+  while (i < tokens.length) {
+    if (endHints.some(h => tokens[i]?.startsWith(h))) break;
+    if (!/\([A-Z0-9]{3}\)$/.test(tokens[i] || '') || !/^\d{1,2}:\d{2}\s*(am|pm)$/i.test(tokens[i+1] || '')) { i++; continue; }
+    const origin = tokens[i];
+    const arrival = tokens[i+1];
+    let j = i + 2;
+    let terminal = '';
+    while (j < tokens.length - 1) {
+      const t = tokens[j];
+      const n = tokens[j+1];
+      if (/^[A-Z0-9]$/.test(t) && n === `Terminal ${t}`) { terminal = t; break; }
+      if (/\([A-Z0-9]{3}\)$/.test(t) && /^\d{1,2}:\d{2}\s*(am|pm)$/i.test(tokens[j+1] || '')) break;
+      j++;
+    }
+    if (!terminal) { i += 2; continue; }
+    const middle = tokens.slice(i+2, j);
+    const flightCodes = [];
+    const airlineNames = [];
+    let inAirlines = false;
+    for (const m of middle) {
+      if (!inAirlines && isFlightCode(m)) flightCodes.push(m); else { inAirlines = true; airlineNames.push(m); }
+    }
+    const status = (tokens[j+2] || '').replace(' [+]', '').replace('[+]', '').trim();
+    rows.push({ origin, arrival, flight: flightCodes.join(' / '), airline: airlineNames.join(' / '), terminal, status });
+    i = j + 3;
+  }
+  return rows;
+}
+
+async function fetchAirportDay(airport) {
+  const base = SOURCES[airport];
+  const urls = [base + '?tp=0', base, base + '?tp=6', base + '?tp=12', base + '?tp=18'];
+  const out = [];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 airport-display/1.0' }, timeout: 15000 });
+      if (!res.ok) continue;
+      out.push(...parseFlights(await res.text()));
+    } catch (e) { console.error('Fetch failed', url, e.message); }
+  }
+  return uniqByFlight(out);
+}
+
+app.use(express.static('public'));
+app.get('/api/arrivals/:slug', async (req, res) => {
+  const cfg = TERMINALS[req.params.slug];
+  if (!cfg) return res.status(404).json({ error:'Unknown terminal' });
+  const all = await fetchAirportDay(cfg.airport);
+  const flights = all.filter(f => String(f.terminal).toUpperCase() === cfg.terminal && isInternational(f.origin));
+  res.set('Cache-Control', 'public, max-age=60');
+  res.json({ ...cfg, source:SOURCES[cfg.airport], updatedAt:new Date().toISOString(), count:flights.length, flights });
+});
+
+app.get('/:slug', (req,res,next) => TERMINALS[req.params.slug] ? res.sendFile(process.cwd() + '/public/index.html') : next());
+app.get('/', (req,res) => res.redirect('/jfk-terminal-1'));
+app.listen(PORT, () => console.log(`Airport arrivals site running at http://localhost:${PORT}`));
