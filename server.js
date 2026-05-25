@@ -20,14 +20,49 @@ const TERMINALS = {
 };
 
 // US + territories to remove domestic flights. Canada/Mexico/Caribbean remain international.
-const US_AIRPORTS = new Set(`ABE ABI ABQ ACK ACT ACV ACY ADK ADQ AEX AGS ALB ANC APN ASE ATL ATW AUS AVL AVP AZA BDL BET BFF BFI BFL BGM BGR BHM BIL BIS BJI BLI BMI BNA BOI BOS BPT BQK BRD BRO BTM BTR BTV BUF BUR BWI BZN CAE CAK CDC CDV CGI CHA CHO CHS CID CIU CKB CLE CLL CLT CMH CMI CMX COD COS COU CPR CRP CRW CSG CVG CWA DAB DAL DAY DBQ DCA DEN DFW DHN DIK DLG DLH DRO DSM DTW EAU ECP EGE EKO ELM ELP ERI ESC EUG EVV EWN EWR EYW FAI FAR FAT FAY FCA FLG FLL FLO FNT FSD FSM FWA GCK GEG GFK GGG GJT GNV GPT GRB GRK GRR GSO GSP GST GTF GTR GUC HDN HGR HHH HIB HLN HNL HOB HOU HPN HRL HSV HTS HVN HYA IAD IAH ICT IDA ILM IMT IND INL IPL ITH JAC JAN JAX JFK JLN JNU KOA KTn LAN LAS LAW LAX LBB LBE LCH LEX LFT LGA LGB LIH LIT LNK LRD LSE LWS MAF MBS MCI MCO MDT MDW MEI MEM MFE MFR MGM MHK MHT MIA MKE MKG MLB MLI MLU MOB MOT MQT MRY MSN MSO MSP MSY MTJ MVY MYR OAJ OAK OGG OKC OMA ONT ORD ORF ORH OTH PAH PBG PBI PDX PGD PHF PHL PHX PIA PIB PIE PIT PLN PNS PPG PSC PSE PSG PSP PUB PVD PWM RAP RDD RDM RDU RFD RHI RIC RKS RNO ROA ROC ROW RST RSW SAF SAN SAT SAV SBA SBN SBP SCC SCE SDF SEA SFO SGF SGU SHD SHV SIT SJC SJT SJU SLC SLN SMF SMX SNA SPI SPS SRQ STC STL STS SUN SUX SWF SYR TLH TOL TPA TRI TTN TUL TUS TVC TWF TXK TYR TYS USA VEL VPS WRG XNA YAK YUM ITO GUM SPN STT STX BQN ILG ILN TEB PAE RIC`.split(/\s+/));
+const US_AIRPORTS = new Set(`ABE ABI ABQ ACK ACT ACV ACY ADK ADQ AEX AGS ALB ANC APN ASE ATL ATW AUS AVL AVP AZA BDL BET BFF BFI BFL BGM BGR BHM BIL BIS BJI BLI BMI BNA BOI BOS BPT BQK BRD BRO BTM BTR BTV BUF BUR BWI BZN CAE CAK CDC CDV CGI CHA CHO CHS CID CIU CKB CLE CLL CLT CMH CMI CMX COD COS COU CPR CRP CRW CSG CVG CWA DAB DAL DAY DBQ DCA DEN DFW DHN DIK DLG DLH DRO DSM DTW EAU ECP EGE EKO ELM ELP ERI ESC EUG EVV EWN EWR EYW FAI FAR FAT FAY FCA FLG FLL FLO FNT FSD FSM FWA GCK GEG GFK GGG GJT GNV GPT GRB GRK GRR GSO GSP GST GTF GTR GUC HDN HGR HHH HIB HLN HNL HOB HOU HPN HRL HSV HTS HVN HYA IAD IAH ICT IDA ILM IMT IND INL IPL ITH JAC JAN JAX JFK JLN JNU KOA KTN LAN LAS LAW LAX LBB LBE LCH LEX LFT LGA LGB LIH LIT LNK LRD LSE LWS MAF MBS MCI MCO MDT MDW MEI MEM MFE MFR MGM MHK MHT MIA MKE MKG MLB MLI MLU MOB MOT MQT MRY MSN MSO MSP MSY MTJ MVY MYR OAJ OAK OGG OKC OMA ONT ORD ORF ORH OTH PAH PBG PBI PDX PGD PHF PHL PHX PIA PIB PIE PIT PLN PNS PPG PSC PSE PSG PSP PUB PVD PWM RAP RDD RDM RDU RFD RHI RIC RKS RNO ROA ROC ROW RST RSW SAF SAN SAT SAV SBA SBN SBP SCC SCE SDF SEA SFO SGF SGU SHD SHV SIT SJC SJT SJU SLC SLN SMF SMX SNA SPI SPS SRQ STC STL STS SUN SUX SWF SYR TLH TOL TPA TRI TTN TUL TUS TVC TWF TXK TYR TYS USA VEL VPS WRG XNA YAK YUM ITO GUM SPN STT STX BQN ILG ILN TEB PAE`.split(/\s+/));
 
-function isFlightCode(s) { return /^[A-Z0-9]{1,3}\d{1,4}[A-Z]?$/.test(s.trim()); }
-function iataFromOrigin(origin) { const m = origin.match(/\(([A-Z0-9]{3})\)\s*$/); return m ? m[1] : ''; }
+// Common international origins into JFK/EWR. Add more here anytime.
+const AIRPORT_COUNTRIES = {
+  YYZ:'CA', YUL:'CA', YVR:'CA', YOW:'CA', YHZ:'CA', YQB:'CA', YYC:'CA', YEG:'CA', YWG:'CA', YTZ:'CA',
+  MEX:'MX', CUN:'MX', GDL:'MX', MTY:'MX', BJX:'MX', PVR:'MX', SJD:'MX',
+  LHR:'GB', LGW:'GB', MAN:'GB', EDI:'GB', BHX:'GB', GLA:'GB',
+  DUB:'IE', SNN:'IE',
+  CDG:'FR', ORY:'FR', NCE:'FR',
+  AMS:'NL', BRU:'BE', ZRH:'CH', GVA:'CH', VIE:'AT',
+  FRA:'DE', MUC:'DE', BER:'DE', DUS:'DE', HAM:'DE',
+  MAD:'ES', BCN:'ES', AGP:'ES', LIS:'PT', OPO:'PT',
+  FCO:'IT', MXP:'IT', VCE:'IT', NAP:'IT',
+  ATH:'GR', IST:'TR', SAW:'TR', WAW:'PL', PRG:'CZ', BUD:'HU', CPH:'DK', ARN:'SE', OSL:'NO', HEL:'FI', KEF:'IS',
+  DXB:'AE', AUH:'AE', DOH:'QA', JED:'SA', RUH:'SA', AMM:'JO', CAI:'EG', TLV:'IL', BEY:'LB', KWI:'KW',
+  DEL:'IN', BOM:'IN', BLR:'IN', HYD:'IN', AMD:'IN', MAA:'IN',
+  ISB:'PK', LHE:'PK', KHI:'PK', DAC:'BD', CMB:'LK', KTM:'NP',
+  NRT:'JP', HND:'JP', KIX:'JP', ICN:'KR', PEK:'CN', PKX:'CN', PVG:'CN', CAN:'CN', HKG:'HK', TPE:'TW',
+  SIN:'SG', BKK:'TH', MNL:'PH', SGN:'VN', HAN:'VN', KUL:'MY', CGK:'ID',
+  GRU:'BR', GIG:'BR', BSB:'BR', EZE:'AR', AEP:'AR', SCL:'CL', LIM:'PE', BOG:'CO', MDE:'CO', CLO:'CO', UIO:'EC', GYE:'EC', GEO:'GY',
+  PTY:'PA', SJO:'CR', GUA:'GT', SAL:'SV', SAP:'HN', MGA:'NI', BZE:'BZ',
+  SDQ:'DO', STI:'DO', PUJ:'DO', POP:'DO', SJU:'PR', NAS:'BS', BDA:'BM', AUA:'AW', CUR:'CW', BON:'BQ', SXM:'SX', POS:'TT', ANU:'AG', BGI:'BB', MBJ:'JM', KIN:'JM', GCM:'KY', PLS:'TC', UVF:'LC', GND:'GD', PAP:'HT', HAV:'CU',
+  CMN:'MA', RAK:'MA', ACC:'GH', LOS:'NG', ABJ:'CI', DSS:'SN', NBO:'KE', JNB:'ZA', CPT:'ZA', ADD:'ET',
+  SYD:'AU', MEL:'AU', AKL:'NZ'
+};
+
+function flagEmoji(countryCode) {
+  if (!countryCode || countryCode.length !== 2) return '';
+  return countryCode.toUpperCase().replace(/./g, c => String.fromCodePoint(127397 + c.charCodeAt()));
+}
+function isFlightCode(s) { return /^[A-Z0-9]{1,3}\d{1,4}[A-Z]?$/.test(String(s).trim()); }
+function iataFromOrigin(origin) { const m = String(origin || '').match(/\(([A-Z0-9]{3})\)\s*$/); return m ? m[1] : ''; }
 function isInternational(origin) { const code = iataFromOrigin(origin); return code && !US_AIRPORTS.has(code); }
+function airlineCodeFromFlight(flight) { const m = String(flight || '').match(/^([A-Z0-9]{1,3})\d/); return m ? m[1] : ''; }
+function expectedFromStatus(status, scheduled) {
+  const text = String(status || '');
+  const times = text.match(/\b\d{1,2}:\d{2}\s*(?:am|pm)\b/ig) || [];
+  const diff = times.find(t => t.toLowerCase() !== String(scheduled || '').toLowerCase());
+  return diff || scheduled || '';
+}
 function uniqByFlight(rows) {
   const seen = new Set();
-  return rows.filter(r => { const k = `${r.flight}|${r.arrival}|${r.terminal}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  return rows.filter(r => { const k = `${r.flight}|${r.scheduled}|${r.terminal}`; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
 function parseFlights(html) {
@@ -43,7 +78,9 @@ function parseFlights(html) {
     if (endHints.some(h => tokens[i]?.startsWith(h))) break;
     if (!/\([A-Z0-9]{3}\)$/.test(tokens[i] || '') || !/^\d{1,2}:\d{2}\s*(am|pm)$/i.test(tokens[i+1] || '')) { i++; continue; }
     const origin = tokens[i];
-    const arrival = tokens[i+1];
+    const originCode = iataFromOrigin(origin);
+    const countryCode = AIRPORT_COUNTRIES[originCode] || '';
+    const scheduled = tokens[i+1];
     let j = i + 2;
     let terminal = '';
     while (j < tokens.length - 1) {
@@ -62,7 +99,22 @@ function parseFlights(html) {
       if (!inAirlines && isFlightCode(m)) flightCodes.push(m); else { inAirlines = true; airlineNames.push(m); }
     }
     const status = (tokens[j+2] || '').replace(' [+]', '').replace('[+]', '').trim();
-    rows.push({ origin, arrival, flight: flightCodes.join(' / '), airline: airlineNames.join(' / '), terminal, status });
+    const flight = flightCodes.join(' / ');
+    const airlineCode = airlineCodeFromFlight(flightCodes[0] || '');
+    rows.push({
+      origin,
+      originCode,
+      countryCode,
+      flag: flagEmoji(countryCode),
+      scheduled,
+      expected: expectedFromStatus(status, scheduled),
+      flight,
+      airline: airlineNames.join(' / '),
+      airlineCode,
+      logoUrl: airlineCode ? `https://images.kiwi.com/airlines/64/${airlineCode}.png` : '',
+      terminal,
+      status
+    });
     i = j + 3;
   }
   return rows;
@@ -88,7 +140,7 @@ app.get('/api/arrivals/:slug', async (req, res) => {
   if (!cfg) return res.status(404).json({ error:'Unknown terminal' });
   const all = await fetchAirportDay(cfg.airport);
   const flights = all.filter(f => String(f.terminal).toUpperCase() === cfg.terminal && isInternational(f.origin));
-  res.set('Cache-Control', 'public, max-age=60');
+  res.set('Cache-Control', 'public, max-age=300');
   res.json({ ...cfg, source:SOURCES[cfg.airport], updatedAt:new Date().toISOString(), count:flights.length, flights });
 });
 
