@@ -120,28 +120,103 @@ function parseFlights(html) {
   return rows;
 }
 
-async function fetchAirportDay(airport) {
+const CACHE_TTL_MS = 10 * 60 * 1000;
+const cache = {
+  JFK: { flights: [], updatedAt: null, refreshing: false, error: null },
+  EWR: { flights: [], updatedAt: null, refreshing: false, error: null }
+};
+
+async function fetchAirportDayLive(airport) {
   const base = SOURCES[airport];
   const urls = [base + '?tp=0', base, base + '?tp=6', base + '?tp=12', base + '?tp=18'];
   const out = [];
   for (const url of urls) {
     try {
-      const res = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 airport-display/1.0' }, timeout: 15000 });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      const res = await fetch(url, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+          'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timer);
       if (!res.ok) continue;
       out.push(...parseFlights(await res.text()));
-    } catch (e) { console.error('Fetch failed', url, e.message); }
+    } catch (e) {
+      console.error('Fetch failed', url, e.message);
+    }
   }
   return uniqByFlight(out);
+}
+
+async function refreshAirport(airport, force = false) {
+  const c = cache[airport];
+  const freshEnough = c.updatedAt && (Date.now() - new Date(c.updatedAt).getTime() < CACHE_TTL_MS);
+  if (!force && freshEnough) return c;
+  if (c.refreshing) return c;
+
+  c.refreshing = true;
+  c.error = null;
+  try {
+    console.log(`Refreshing ${airport} arrivals cache...`);
+    const flights = await fetchAirportDayLive(airport);
+    if (flights.length) {
+      c.flights = flights;
+      c.updatedAt = new Date().toISOString();
+      c.error = null;
+      console.log(`${airport} cache updated: ${flights.length} flights`);
+    } else {
+      c.error = 'No flights returned from source site';
+      console.log(`${airport} cache refresh returned 0 flights; keeping old cache if available`);
+      if (!c.updatedAt) c.updatedAt = new Date().toISOString();
+    }
+  } catch (e) {
+    c.error = e.message;
+    console.error(`${airport} cache refresh failed`, e);
+  } finally {
+    c.refreshing = false;
+  }
+  return c;
+}
+
+function getAirportCached(airport) {
+  const c = cache[airport];
+  const stale = !c.updatedAt || (Date.now() - new Date(c.updatedAt).getTime() > CACHE_TTL_MS);
+  if (stale && !c.refreshing) refreshAirport(airport).catch(console.error);
+  return c;
+}
+
+// Start warming the cache immediately, then refresh every 10 minutes.
+for (const airport of Object.keys(cache)) {
+  refreshAirport(airport, true).catch(console.error);
+  setInterval(() => refreshAirport(airport, true).catch(console.error), CACHE_TTL_MS);
 }
 
 app.use(express.static('public'));
 app.get('/api/arrivals/:slug', async (req, res) => {
   const cfg = TERMINALS[req.params.slug];
   if (!cfg) return res.status(404).json({ error:'Unknown terminal' });
-  const all = await fetchAirportDay(cfg.airport);
-  const flights = all.filter(f => String(f.terminal).toUpperCase() === cfg.terminal && isInternational(f.origin));
-  res.set('Cache-Control', 'public, max-age=300');
-  res.json({ ...cfg, source:SOURCES[cfg.airport], updatedAt:new Date().toISOString(), count:flights.length, flights });
+
+  // Return cached results instantly. If stale, a background refresh is already running.
+  const c = getAirportCached(cfg.airport);
+  const flights = c.flights.filter(f => String(f.terminal).toUpperCase() === cfg.terminal && isInternational(f.origin));
+  res.set('Cache-Control', 'public, max-age=60');
+  res.json({
+    ...cfg,
+    source:SOURCES[cfg.airport],
+    updatedAt:c.updatedAt || new Date().toISOString(),
+    refreshing:c.refreshing,
+    error:c.error,
+    count:flights.length,
+    flights
+  });
+});
+
+app.get('/api/refresh', async (req, res) => {
+  await Promise.all(Object.keys(cache).map(a => refreshAirport(a, true)));
+  res.json({ ok:true, cache });
 });
 
 app.get('/:slug', (req,res,next) => TERMINALS[req.params.slug] ? res.sendFile(process.cwd() + '/public/index.html') : next());
