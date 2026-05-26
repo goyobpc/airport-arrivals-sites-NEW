@@ -62,10 +62,76 @@ function expectedFromStatus(status, scheduled) {
 }
 function uniqByFlight(rows) {
   const seen = new Set();
-  return rows.filter(r => { const k = `${r.flight}|${r.scheduled}|${r.terminal}`; if (seen.has(k)) return false; seen.add(k); return true; });
+  return rows.filter(r => { const k = `${r.flight}|${r.scheduled}|${r.terminal}|${r.dayKey || ''}`; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
-function parseFlights(html) {
+// Rolling display window: keep the last 3 hours and the next 21 hours.
+// Example: at 5 PM, show 2 PM today through 2 PM tomorrow.
+const LOOKBACK_HOURS = 3;
+const WINDOW_HOURS = 24;
+
+function nyParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+  }).formatToParts(date).reduce((acc, p) => (acc[p.type] = p.value, acc), {});
+  return {
+    year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
+    hour: Number(parts.hour === '24' ? '0' : parts.hour), minute: Number(parts.minute), second: Number(parts.second)
+  };
+}
+
+function nyOffsetMinutes(utcMs) {
+  const p = nyParts(new Date(utcMs));
+  const asUTC = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return Math.round((asUTC - utcMs) / 60000);
+}
+
+function nyLocalToUtcMs(year, month, day, hour, minute) {
+  const guess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  return guess - nyOffsetMinutes(guess) * 60000;
+}
+
+function addDaysNY(baseNY, days) {
+  const d = new Date(Date.UTC(baseNY.year, baseNY.month - 1, baseNY.day + days, 12, 0, 0));
+  const p = nyParts(d);
+  return { year: p.year, month: p.month, day: p.day };
+}
+
+function parseClock(timeText) {
+  const m = String(timeText || '').match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
+  if (!m) return null;
+  let hour = Number(m[1]);
+  const minute = Number(m[2]);
+  const ap = m[3].toLowerCase();
+  if (ap === 'pm' && hour !== 12) hour += 12;
+  if (ap === 'am' && hour === 12) hour = 0;
+  return { hour, minute };
+}
+
+function flightDateInfo(dayOffset, timeText) {
+  const nowNY = nyParts(new Date());
+  const d = addDaysNY(nowNY, dayOffset);
+  const t = parseClock(timeText);
+  if (!t) return { scheduledDateTime: null, dayLabel: '' };
+  const ms = nyLocalToUtcMs(d.year, d.month, d.day, t.hour, t.minute);
+  const label = dayOffset === -1 ? 'Yesterday' : dayOffset === 0 ? 'Today' : 'Tomorrow';
+  return {
+    scheduledDateTime: new Date(ms).toISOString(),
+    scheduledMs: ms,
+    dayLabel: label,
+    scheduledDisplay: `${timeText} ${label === 'Today' ? '' : label}`.trim()
+  };
+}
+
+function withinRollingWindow(f) {
+  if (!f.scheduledMs) return false;
+  const start = Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000;
+  const end = start + WINDOW_HOURS * 60 * 60 * 1000;
+  return f.scheduledMs >= start && f.scheduledMs <= end;
+}
+
+function parseFlights(html, dayOffset = 0) {
   const $ = cheerio.load(html);
   $('script,style,noscript,svg,form,nav,footer').remove();
   const raw = $('body').text().split('\n').map(x => x.replace(/\s+/g,' ').trim()).filter(Boolean);
@@ -101,12 +167,17 @@ function parseFlights(html) {
     const status = (tokens[j+2] || '').replace(' [+]', '').replace('[+]', '').trim();
     const flight = flightCodes.join(' / ');
     const airlineCode = airlineCodeFromFlight(flightCodes[0] || '');
+    const dateInfo = flightDateInfo(dayOffset, scheduled);
     rows.push({
       origin,
       originCode,
       countryCode,
       flag: flagEmoji(countryCode),
       scheduled,
+      scheduledDisplay: dateInfo.scheduledDisplay,
+      scheduledDateTime: dateInfo.scheduledDateTime,
+      scheduledMs: dateInfo.scheduledMs,
+      dayLabel: dateInfo.dayLabel,
       expected: expectedFromStatus(status, scheduled),
       flight,
       airline: airlineNames.join(' / '),
@@ -128,13 +199,29 @@ const cache = {
 
 async function fetchAirportDayLive(airport) {
   const base = SOURCES[airport];
-  const urls = [base + '?tp=0', base, base + '?tp=6', base + '?tp=12', base + '?tp=18'];
+  const requests = [
+    // Yesterday is only needed right after midnight because the 3-hour lookback
+    // can include late-night flights from the prior day.
+    { url: `${base}?day=yesterday`, dayOffset: -1 },
+
+    // Today: pull all four 6-hour blocks so we can cover the rolling window.
+    { url: `${base}?tp=0`, dayOffset: 0 },
+    { url: `${base}?tp=6`, dayOffset: 0 },
+    { url: `${base}?tp=12`, dayOffset: 0 },
+    { url: `${base}?tp=18`, dayOffset: 0 },
+    { url: base, dayOffset: 0 },
+
+    // Tomorrow: this source supports day=tomorrow pages; useful for the next-day
+    // portion of the rolling 24-hour window.
+    { url: `${base}?day=tomorrow`, dayOffset: 1 }
+  ];
+
   const out = [];
-  for (const url of urls) {
+  for (const req of requests) {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 12000);
-      const res = await fetch(url, {
+      const res = await fetch(req.url, {
         headers: {
           'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/120 Safari/537.36',
           'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
@@ -143,12 +230,14 @@ async function fetchAirportDayLive(airport) {
       });
       clearTimeout(timer);
       if (!res.ok) continue;
-      out.push(...parseFlights(await res.text()));
+      out.push(...parseFlights(await res.text(), req.dayOffset));
     } catch (e) {
-      console.error('Fetch failed', url, e.message);
+      console.error('Fetch failed', req.url, e.message);
     }
   }
-  return uniqByFlight(out);
+  return uniqByFlight(out)
+    .filter(withinRollingWindow)
+    .sort((a, b) => (a.scheduledMs || 0) - (b.scheduledMs || 0));
 }
 
 async function refreshAirport(airport, force = false) {
@@ -201,7 +290,7 @@ app.get('/api/arrivals/:slug', async (req, res) => {
 
   // Return cached results instantly. If stale, a background refresh is already running.
   const c = getAirportCached(cfg.airport);
-  const flights = c.flights.filter(f => String(f.terminal).toUpperCase() === cfg.terminal && isInternational(f.origin));
+  const flights = c.flights.filter(f => String(f.terminal).toUpperCase() === cfg.terminal && isInternational(f.origin) && withinRollingWindow(f));
   res.set('Cache-Control', 'public, max-age=60');
   res.json({
     ...cfg,

@@ -17,7 +17,7 @@ async function load(){
     const data=await r.json();
     document.title=`${data.title} International Arrivals`;
     document.getElementById('title').textContent=`${data.title} — International Arrivals`;
-    document.getElementById('count').textContent=`${data.count} international flights`;
+    document.getElementById('count').textContent=`${data.count} international flights — rolling 24 hours`;
     document.getElementById('updated').textContent=`Updated ${new Date(data.updatedAt).toLocaleTimeString()}`;
     rowsEl.innerHTML='';
     if(!data.flights.length){
@@ -29,7 +29,7 @@ async function load(){
       const delayed=/delay|late/i.test(f.status||'');
       const landed=/landed|arrived/i.test(f.status||'');
       tr.innerHTML=`
-        <td class="time scheduled">${esc(f.scheduled)}</td>
+        <td class="time scheduled">${esc(f.scheduledDisplay || f.scheduled)}</td>
         <td class="time expected">${esc(f.expected)}</td>
         <td><span class="flag">${esc(f.flag)}</span> ${esc(f.origin)}</td>
         <td class="flight">${esc(f.flight)}</td>
