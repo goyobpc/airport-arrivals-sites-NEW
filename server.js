@@ -5,18 +5,13 @@ import * as cheerio from 'cheerio';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const SOURCES = {
-  JFK: 'https://www.airport-jfk.com/arrivals.php',
-  EWR: 'https://www.airport-ewr.com/newark-arrivals'
-};
-
 const TERMINALS = {
-  'jfk-terminal-1': { airport:'JFK', terminal:'1', title:'JFK Terminal 1' },
-  'jfk-terminal-4': { airport:'JFK', terminal:'4', title:'JFK Terminal 4' },
-  'jfk-terminal-7': { airport:'JFK', terminal:'7', title:'JFK Terminal 7' },
-  'jfk-terminal-8': { airport:'JFK', terminal:'8', title:'JFK Terminal 8' },
-  'ewr-terminal-b': { airport:'EWR', terminal:'B', title:'EWR Terminal B' },
-  'ewr-terminal-c': { airport:'EWR', terminal:'C', title:'EWR Terminal C' }
+  'jfk-terminal-1': { airport:'JFK', terminal:'1', title:'JFK Terminal 1', source:'https://www.airport-jfk.com/arrivals-terminal-1' },
+  'jfk-terminal-4': { airport:'JFK', terminal:'4', title:'JFK Terminal 4', source:'https://www.airport-jfk.com/arrivals-terminal-4' },
+  'jfk-terminal-7': { airport:'JFK', terminal:'7', title:'JFK Terminal 7', source:'https://www.airport-jfk.com/arrivals-terminal-7' },
+  'jfk-terminal-8': { airport:'JFK', terminal:'8', title:'JFK Terminal 8', source:'https://www.airport-jfk.com/arrivals-terminal-8' },
+  'ewr-terminal-b': { airport:'EWR', terminal:'B', title:'EWR Terminal B', source:'https://www.airport-ewr.com/newark-arrivals-terminal-B' },
+  'ewr-terminal-c': { airport:'EWR', terminal:'C', title:'EWR Terminal C', source:'https://www.airport-ewr.com/newark-arrivals-terminal-C' }
 };
 
 // US + territories to remove domestic flights. Canada/Mexico/Caribbean remain international.
@@ -200,33 +195,34 @@ function parseFlights(html, dayOffset = 0) {
 }
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
-const cache = {
-  JFK: { flights: [], updatedAt: null, refreshing: false, error: null },
-  EWR: { flights: [], updatedAt: null, refreshing: false, error: null }
-};
+const cache = Object.fromEntries(Object.keys(TERMINALS).map(slug => [
+  slug,
+  { flights: [], updatedAt: null, refreshing: false, error: null }
+]));
 
-async function fetchAirportDayLive(airport) {
-  const base = SOURCES[airport];
-  const nowNY = nyParts(new Date());
+async function fetchTerminalDayLive(slug) {
+  const cfg = TERMINALS[slug];
+  const base = cfg.source;
 
-  // IMPORTANT: we only hit the source pages we actually need.
-  // The old version tried multiple 6-hour blocks plus full-day pages.
-  // That was too slow on Render and could leave the page stuck loading.
-  // Same-day mode: only request today's arrivals page.
-  // Do not request tomorrow, because employees only want today's remaining flights.
-  const requests = [
-    { url: base, dayOffset: 0 }
-  ];
+  // IMPORTANT FIX:
+  // Instead of scraping the big airport-wide page and filtering afterward,
+  // each terminal now pulls its own terminal-specific page for all four same-day time blocks.
+  // This fixes the issue where every page stopped around 11 AM.
+  const requests = ['', '?tp=0', '?tp=6', '?tp=12', '?tp=18'].map(suffix => ({
+    url: `${base}${suffix}`,
+    dayOffset: 0
+  }));
 
   async function fetchOne(req) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), 20000);
     try {
       const res = await fetch(req.url, {
         headers: {
           'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/120 Safari/537.36',
           'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'accept-language': 'en-US,en;q=0.9'
+          'accept-language': 'en-US,en;q=0.9',
+          'cache-control': 'no-cache'
         },
         signal: controller.signal
       });
@@ -242,16 +238,18 @@ async function fetchAirportDayLive(airport) {
   const out = [];
   for (const result of settled) {
     if (result.status === 'fulfilled') out.push(...result.value);
-    else console.error(`${airport} source page failed:`, result.reason?.message || result.reason);
+    else console.error(`${slug} source page failed:`, result.reason?.message || result.reason);
   }
 
   return uniqByFlight(out)
+    .filter(f => String(f.terminal).toUpperCase() === String(cfg.terminal).toUpperCase())
+    .filter(f => isInternational(f.origin))
     .filter(withinSameDayWindow)
     .sort((a, b) => (a.scheduledMs || 0) - (b.scheduledMs || 0));
 }
 
-async function refreshAirport(airport, force = false) {
-  const c = cache[airport];
+async function refreshTerminal(slug, force = false) {
+  const c = cache[slug];
   const freshEnough = c.updatedAt && (Date.now() - new Date(c.updatedAt).getTime() < CACHE_TTL_MS);
   if (!force && freshEnough) return c;
   if (c.refreshing) return c;
@@ -259,38 +257,34 @@ async function refreshAirport(airport, force = false) {
   c.refreshing = true;
   c.error = null;
   try {
-    console.log(`Refreshing ${airport} arrivals cache...`);
-    const flights = await fetchAirportDayLive(airport);
-    if (flights.length) {
-      c.flights = flights;
-      c.updatedAt = new Date().toISOString();
-      c.error = null;
-      console.log(`${airport} cache updated: ${flights.length} flights`);
-    } else {
-      c.error = 'No flights returned from source site';
-      console.log(`${airport} cache refresh returned 0 flights; keeping old cache if available`);
-      if (!c.updatedAt) c.updatedAt = new Date().toISOString();
-    }
+    console.log(`Refreshing ${slug} arrivals cache...`);
+    const flights = await fetchTerminalDayLive(slug);
+    c.flights = flights;
+    c.updatedAt = new Date().toISOString();
+    c.error = flights.length ? null : 'No international same-day flights returned from source site';
+    console.log(`${slug} cache updated: ${flights.length} flights`);
   } catch (e) {
     c.error = e.message;
-    console.error(`${airport} cache refresh failed`, e);
+    console.error(`${slug} cache refresh failed`, e);
+    if (!c.updatedAt) c.updatedAt = new Date().toISOString();
   } finally {
     c.refreshing = false;
   }
   return c;
 }
 
-function getAirportCached(airport) {
-  const c = cache[airport];
+function getTerminalCached(slug) {
+  const c = cache[slug];
   const stale = !c.updatedAt || (Date.now() - new Date(c.updatedAt).getTime() > CACHE_TTL_MS);
-  if (stale && !c.refreshing) refreshAirport(airport).catch(console.error);
+  if (stale && !c.refreshing) refreshTerminal(slug).catch(console.error);
   return c;
 }
 
-// Start warming the cache immediately, then refresh every 10 minutes.
-for (const airport of Object.keys(cache)) {
-  refreshAirport(airport, true).catch(console.error);
-  setInterval(() => refreshAirport(airport, true).catch(console.error), CACHE_TTL_MS);
+// Warm each terminal cache immediately, then refresh in background every 10 minutes.
+// This is server-side only; the browser page itself does NOT auto-refresh.
+for (const slug of Object.keys(cache)) {
+  refreshTerminal(slug, true).catch(console.error);
+  setInterval(() => refreshTerminal(slug, true).catch(console.error), CACHE_TTL_MS);
 }
 
 app.use(express.static('public'));
@@ -298,23 +292,22 @@ app.get('/api/arrivals/:slug', async (req, res) => {
   const cfg = TERMINALS[req.params.slug];
   if (!cfg) return res.status(404).json({ error:'Unknown terminal' });
 
-  // Return cached results instantly. If stale, a background refresh is already running.
-  const c = getAirportCached(cfg.airport);
-  const flights = c.flights.filter(f => String(f.terminal).toUpperCase() === cfg.terminal && isInternational(f.origin) && withinSameDayWindow(f));
+  const c = getTerminalCached(req.params.slug);
+  const flights = c.flights.filter(withinSameDayWindow);
   res.set('Cache-Control', 'public, max-age=60');
   res.json({
     ...cfg,
-    source:SOURCES[cfg.airport],
-    updatedAt:c.updatedAt || new Date().toISOString(),
-    refreshing:c.refreshing,
-    error:c.error,
-    count:flights.length,
+    source: cfg.source,
+    updatedAt: c.updatedAt || new Date().toISOString(),
+    refreshing: c.refreshing,
+    error: c.error,
+    count: flights.length,
     flights
   });
 });
 
 app.get('/api/refresh', async (req, res) => {
-  await Promise.all(Object.keys(cache).map(a => refreshAirport(a, true)));
+  await Promise.all(Object.keys(cache).map(slug => refreshTerminal(slug, true)));
   res.json({ ok:true, cache });
 });
 

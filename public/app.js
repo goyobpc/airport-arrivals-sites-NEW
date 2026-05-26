@@ -18,14 +18,14 @@ async function load(){
     const data=await r.json();
     document.title=`${data.title} International Arrivals`;
     document.getElementById('title').textContent=`${data.title} — International Arrivals`;
-    document.getElementById('count').textContent=`${data.count} international flights — same day`;
+    document.getElementById('count').textContent=`${data.count} international flights — today`;
     document.getElementById('updated').textContent=data.refreshing
       ? `Updating now… last cache ${data.updatedAt ? new Date(data.updatedAt).toLocaleTimeString() : 'not ready yet'}`
       : `Updated ${new Date(data.updatedAt).toLocaleTimeString()}`;
     rowsEl.innerHTML='';
     if(!data.flights.length){
       const msg = data.refreshing
-        ? 'Warming up flight data. This can take 30–60 seconds on the free Render plan. The page will retry automatically.'
+        ? 'Warming up flight data. This can take 30–60 seconds on the free Render plan. Refresh manually in a minute if needed.'
         : (data.error ? `No flights loaded yet. Source message: ${data.error}` : 'No international arrivals found right now for this terminal.');
       rowsEl.innerHTML=`<tr><td colspan="7">${esc(msg)}</td></tr>`;
       if(data.refreshing || data.error) setTimeout(load, WARMUP_RETRY_MS);
