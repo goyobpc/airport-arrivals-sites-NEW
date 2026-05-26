@@ -46,7 +46,7 @@ function flagEmoji(countryCode) {
   return countryCode.toUpperCase().replace(/./g, c => String.fromCodePoint(127397 + c.charCodeAt()));
 }
 function isFlightCode(s) { return /^[A-Z0-9]{1,3}\d{1,4}[A-Z]?$/.test(String(s).trim()); }
-function iataFromOrigin(origin) { const m = String(origin || '').match(/\(([A-Z0-9]{3})\)\s*$/); return m ? m[1] : ''; }
+function iataFromOrigin(origin) { const m = String(origin || '').match(/\(\s*([A-Z0-9]{3})\s*\)\s*$/); return m ? m[1] : ''; }
 function isInternational(origin) { const code = iataFromOrigin(origin); return code && !US_AIRPORTS.has(code); }
 function airlineCodeFromFlight(flight) { const m = String(flight || '').match(/^([A-Z0-9]{1,3})\d/); return m ? m[1] : ''; }
 function expectedFromStatus(status, scheduled) {
@@ -145,7 +145,7 @@ function parseFlights(html, dayOffset = 0) {
   let i = 0;
   while (i < tokens.length) {
     if (endHints.some(h => tokens[i]?.startsWith(h))) break;
-    if (!/\([A-Z0-9]{3}\)$/.test(tokens[i] || '') || !/^\d{1,2}:\d{2}\s*(am|pm)$/i.test(tokens[i+1] || '')) { i++; continue; }
+    if (!/\(\s*[A-Z0-9]{3}\s*\)\s*$/.test(tokens[i] || '') || !/^\d{1,2}:\d{2}\s*(am|pm)$/i.test(tokens[i+1] || '')) { i++; continue; }
     const origin = tokens[i];
     const originCode = iataFromOrigin(origin);
     const countryCode = AIRPORT_COUNTRIES[originCode] || '';
@@ -156,7 +156,7 @@ function parseFlights(html, dayOffset = 0) {
       const t = tokens[j];
       const n = tokens[j+1];
       if (/^[A-Z0-9]$/.test(t) && n === `Terminal ${t}`) { terminal = t; break; }
-      if (/\([A-Z0-9]{3}\)$/.test(t) && /^\d{1,2}:\d{2}\s*(am|pm)$/i.test(tokens[j+1] || '')) break;
+      if (/\(\s*[A-Z0-9]{3}\s*\)\s*$/.test(t) && /^\d{1,2}:\d{2}\s*(am|pm)$/i.test(tokens[j+1] || '')) break;
       j++;
     }
     if (!terminal) { i += 2; continue; }
@@ -304,6 +304,26 @@ app.get('/api/arrivals/:slug', async (req, res) => {
     count: flights.length,
     flights
   });
+});
+
+
+
+app.get('/api/debug/:slug', async (req, res) => {
+  const cfg = TERMINALS[req.params.slug];
+  if (!cfg) return res.status(404).json({ error:'Unknown terminal' });
+  const urls = ['', '?tp=0', '?tp=6', '?tp=12', '?tp=18'].map(suffix => `${cfg.source}${suffix}`);
+  const results = [];
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, { headers: { 'user-agent':'Mozilla/5.0 Chrome/120 Safari/537.36' }});
+      const html = await response.text();
+      const flights = parseFlights(html, 0).filter(f => String(f.terminal).toUpperCase() === String(cfg.terminal).toUpperCase()).filter(f => isInternational(f.origin));
+      results.push({ url, status: response.status, parsedInternationalFlights: flights.length, first: flights[0]?.scheduledDisplay || null, last: flights[flights.length-1]?.scheduledDisplay || null });
+    } catch (e) {
+      results.push({ url, error: e.message });
+    }
+  }
+  res.json({ terminal: cfg.title, results });
 });
 
 app.get('/api/refresh', async (req, res) => {
