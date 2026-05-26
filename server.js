@@ -197,85 +197,59 @@ const cache = {
   EWR: { flights: [], updatedAt: null, refreshing: false, error: null }
 };
 
-async function fetchText(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    const res = await fetch(url, {
-      headers: {
-        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      },
-      signal: controller.signal
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function rollingRequestPlan(airport) {
+async function fetchAirportDayLive(airport) {
   const base = SOURCES[airport];
   const nowNY = nyParts(new Date());
-  const nowMinutes = nowNY.hour * 60 + nowNY.minute;
-  const startMinutes = nowMinutes - LOOKBACK_HOURS * 60;
-  const endMinutes = startMinutes + WINDOW_HOURS * 60;
-  const periods = [0, 6, 12, 18];
-  const needed = [];
 
-  // Which 6-hour blocks overlap the display window?
-  for (let dayOffset = -1; dayOffset <= 1; dayOffset++) {
-    for (const tp of periods) {
-      const blockStart = dayOffset * 1440 + tp * 60;
-      const blockEnd = blockStart + 6 * 60;
-      if (blockEnd >= startMinutes && blockStart <= endMinutes) {
-        needed.push({ dayOffset, tp });
-      }
-    }
-  }
-
-  // Build source URLs. We request time blocks instead of only the homepage,
-  // because the airport pages usually show limited portions of the day.
+  // Full coverage version: pull all 6-hour time blocks for today and tomorrow.
+  // This is needed for the rolling window, e.g. 5 PM today through 2 PM tomorrow.
+  // Requests are run in small batches so Render does not get overloaded.
+  const tps = ['0', '6', '12', '18'];
   const requests = [];
-  for (const n of needed) {
-    if (n.dayOffset === -1) {
-      requests.push({ url: `${base}?day=yesterday&tp=${n.tp}`, dayOffset: -1 });
-      requests.push({ url: `${base}?tp=${n.tp}&day=yesterday`, dayOffset: -1 });
-    } else if (n.dayOffset === 0) {
-      requests.push({ url: `${base}?tp=${n.tp}`, dayOffset: 0 });
-    } else {
-      requests.push({ url: `${base}?day=tomorrow&tp=${n.tp}`, dayOffset: 1 });
-      requests.push({ url: `${base}?tp=${n.tp}&day=tomorrow`, dayOffset: 1 });
+
+  if (nowNY.hour < LOOKBACK_HOURS) {
+    for (const tp of tps) {
+      requests.push({ url: `${base}?day=yesterday&tp=${tp}`, dayOffset: -1 });
     }
   }
 
-  // Fallback URLs. These help when the source site ignores one query format.
-  requests.push({ url: base, dayOffset: 0 });
-  requests.push({ url: `${base}?day=tomorrow`, dayOffset: 1 });
+  for (const tp of tps) {
+    requests.push({ url: `${base}?tp=${tp}`, dayOffset: 0 });
+  }
+  for (const tp of tps) {
+    requests.push({ url: `${base}?day=tomorrow&tp=${tp}`, dayOffset: 1 });
+  }
 
-  // De-dupe URLs.
-  const seen = new Set();
-  return requests.filter(r => {
-    if (seen.has(r.url)) return false;
-    seen.add(r.url);
-    return true;
-  });
-}
-
-async function fetchAirportDayLive(airport) {
-  const requests = rollingRequestPlan(airport);
-
-  // Fetch in parallel so one slow block does not make the whole page hang.
-  const results = await Promise.allSettled(requests.map(async req => {
-    const html = await fetchText(req.url);
-    return parseFlights(html, req.dayOffset);
-  }));
+  async function fetchOne(req) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const res = await fetch(req.url, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+          'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'accept-language': 'en-US,en;q=0.9',
+          'referer': base
+        },
+        signal: controller.signal
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const html = await res.text();
+      return parseFlights(html, req.dayOffset);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   const out = [];
-  for (const r of results) {
-    if (r.status === 'fulfilled') out.push(...r.value);
-    else console.error('Fetch failed', r.reason?.message || r.reason);
+  const batchSize = 2;
+  for (let i = 0; i < requests.length; i += batchSize) {
+    const batch = requests.slice(i, i + batchSize);
+    const settled = await Promise.allSettled(batch.map(fetchOne));
+    for (const result of settled) {
+      if (result.status === 'fulfilled') out.push(...result.value);
+      else console.error(`${airport} source page failed:`, result.reason?.message || result.reason);
+    }
   }
 
   return uniqByFlight(out)
@@ -315,15 +289,14 @@ async function refreshAirport(airport, force = false) {
 
 function getAirportCached(airport) {
   const c = cache[airport];
-  const stale = !c.updatedAt || (Date.now() - new Date(c.updatedAt).getTime() > CACHE_TTL_MS);
-  if (stale && !c.refreshing) refreshAirport(airport).catch(console.error);
+  const missing = !c.updatedAt;
+  if (missing && !c.refreshing) refreshAirport(airport).catch(console.error);
   return c;
 }
 
-// Start warming the cache immediately, then refresh every 10 minutes.
+// Warm the cache on startup only. No automatic refresh loops.
 for (const airport of Object.keys(cache)) {
   refreshAirport(airport, true).catch(console.error);
-  setInterval(() => refreshAirport(airport, true).catch(console.error), CACHE_TTL_MS);
 }
 
 app.use(express.static('public'));
