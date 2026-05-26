@@ -38,7 +38,6 @@ async function load(){
         <td><span class="status ${delayed?'delayed':''} ${landed?'landed':''}">${esc(f.status)}</span></td>`;
       rowsEl.appendChild(tr);
     }
-  }catch(e){ rowsEl.innerHTML='<tr><td colspan="6">Could not load source data. Try refreshing.</td></tr>'; }
   }catch(e){
     rowsEl.innerHTML='<tr><td colspan="7">Could not load source data. Try refreshing.</td></tr>';
   }
