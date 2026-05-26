@@ -197,44 +197,87 @@ const cache = {
   EWR: { flights: [], updatedAt: null, refreshing: false, error: null }
 };
 
-async function fetchAirportDayLive(airport) {
+async function fetchText(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      signal: controller.signal
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function rollingRequestPlan(airport) {
   const base = SOURCES[airport];
-  const requests = [
-    // Yesterday is only needed right after midnight because the 3-hour lookback
-    // can include late-night flights from the prior day.
-    { url: `${base}?day=yesterday`, dayOffset: -1 },
+  const nowNY = nyParts(new Date());
+  const nowMinutes = nowNY.hour * 60 + nowNY.minute;
+  const startMinutes = nowMinutes - LOOKBACK_HOURS * 60;
+  const endMinutes = startMinutes + WINDOW_HOURS * 60;
+  const periods = [0, 6, 12, 18];
+  const needed = [];
 
-    // Today: pull all four 6-hour blocks so we can cover the rolling window.
-    { url: `${base}?tp=0`, dayOffset: 0 },
-    { url: `${base}?tp=6`, dayOffset: 0 },
-    { url: `${base}?tp=12`, dayOffset: 0 },
-    { url: `${base}?tp=18`, dayOffset: 0 },
-    { url: base, dayOffset: 0 },
-
-    // Tomorrow: this source supports day=tomorrow pages; useful for the next-day
-    // portion of the rolling 24-hour window.
-    { url: `${base}?day=tomorrow`, dayOffset: 1 }
-  ];
-
-  const out = [];
-  for (const req of requests) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12000);
-      const res = await fetch(req.url, {
-        headers: {
-          'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-          'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        },
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-      if (!res.ok) continue;
-      out.push(...parseFlights(await res.text(), req.dayOffset));
-    } catch (e) {
-      console.error('Fetch failed', req.url, e.message);
+  // Which 6-hour blocks overlap the display window?
+  for (let dayOffset = -1; dayOffset <= 1; dayOffset++) {
+    for (const tp of periods) {
+      const blockStart = dayOffset * 1440 + tp * 60;
+      const blockEnd = blockStart + 6 * 60;
+      if (blockEnd >= startMinutes && blockStart <= endMinutes) {
+        needed.push({ dayOffset, tp });
+      }
     }
   }
+
+  // Build source URLs. We request time blocks instead of only the homepage,
+  // because the airport pages usually show limited portions of the day.
+  const requests = [];
+  for (const n of needed) {
+    if (n.dayOffset === -1) {
+      requests.push({ url: `${base}?day=yesterday&tp=${n.tp}`, dayOffset: -1 });
+      requests.push({ url: `${base}?tp=${n.tp}&day=yesterday`, dayOffset: -1 });
+    } else if (n.dayOffset === 0) {
+      requests.push({ url: `${base}?tp=${n.tp}`, dayOffset: 0 });
+    } else {
+      requests.push({ url: `${base}?day=tomorrow&tp=${n.tp}`, dayOffset: 1 });
+      requests.push({ url: `${base}?tp=${n.tp}&day=tomorrow`, dayOffset: 1 });
+    }
+  }
+
+  // Fallback URLs. These help when the source site ignores one query format.
+  requests.push({ url: base, dayOffset: 0 });
+  requests.push({ url: `${base}?day=tomorrow`, dayOffset: 1 });
+
+  // De-dupe URLs.
+  const seen = new Set();
+  return requests.filter(r => {
+    if (seen.has(r.url)) return false;
+    seen.add(r.url);
+    return true;
+  });
+}
+
+async function fetchAirportDayLive(airport) {
+  const requests = rollingRequestPlan(airport);
+
+  // Fetch in parallel so one slow block does not make the whole page hang.
+  const results = await Promise.allSettled(requests.map(async req => {
+    const html = await fetchText(req.url);
+    return parseFlights(html, req.dayOffset);
+  }));
+
+  const out = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled') out.push(...r.value);
+    else console.error('Fetch failed', r.reason?.message || r.reason);
+  }
+
   return uniqByFlight(out)
     .filter(withinRollingWindow)
     .sort((a, b) => (a.scheduledMs || 0) - (b.scheduledMs || 0));
